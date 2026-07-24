@@ -21,8 +21,9 @@ export type OAuthProviderKey = 'google' | 'azure';
 export interface LoginSplashProps {
   /** The app's own Supabase client. Auth calls target this and nothing else. */
   supabaseClient: SupabaseClient;
-  /** Absolute URL to return to after auth completes. */
-  redirectTo: string;
+  /** Absolute URL to return to after auth completes.
+   *  Defaults to the current origin (`window.location.origin`). */
+  redirectTo?: string;
   /** Human name of the app, shown in the headline. */
   appName: string;
   /** Which SSO providers to offer. Defaults to both. */
@@ -63,6 +64,12 @@ export function LoginSplash({
   const [email, setEmail] = useState('');
   const [status, setStatus] = useState<Status>({ kind: 'idle' });
 
+  // Default the post-auth return to the current origin. An app can still pass an
+  // explicit path (e.g. `${origin}/auth/callback`) via the redirectTo prop.
+  const resolvedRedirectTo =
+    redirectTo ??
+    (typeof window !== 'undefined' ? window.location.origin : undefined);
+
   useEffect(() => {
     if (typeof document === 'undefined') return;
     // Keyframes can't live in inline styles — inject once.
@@ -87,7 +94,7 @@ export function LoginSplash({
     setStatus({ kind: 'redirecting', provider });
     const { error } = await supabaseClient.auth.signInWithOAuth({
       provider,
-      options: { redirectTo },
+      options: { redirectTo: resolvedRedirectTo },
     });
     if (error) {
       setStatus({ kind: 'error', message: error.message });
@@ -105,7 +112,7 @@ export function LoginSplash({
     setStatus({ kind: 'sending-link' });
     const { error } = await supabaseClient.auth.signInWithOtp({
       email: trimmed,
-      options: { emailRedirectTo: redirectTo },
+      options: { emailRedirectTo: resolvedRedirectTo },
     });
     setStatus(
       error
