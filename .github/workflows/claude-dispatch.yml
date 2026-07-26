@@ -144,8 +144,17 @@ jobs:
           # Every line tolerates a missing file, bad JSON, or absent jq keys — this
           # block must NEVER break the callback (the callback firing is the door).
           # The file is FOUND, not assumed: fast deaths write it in varying temp roots.
-          OUT_FILE=$(find "${RUNNER_TEMP:-/home/runner/work/_temp}" -maxdepth 2 -name 'claude-execution-output.json' 2>/dev/null | head -1)
-          OUT_FILE="${OUT_FILE:-/home/runner/work/_temp/claude-execution-output.json}"
+          # The action PUBLISHES this path as an output (verified in action.yml v1:
+          #   outputs.execution_file — "Path to the Claude Code execution output file").
+          # Earlier revisions searched for it, which was folklore: a guess standing in
+          # for a documented contract. Search is kept only as a fallback for the case
+          # where the step died before publishing any output at all.
+          OUT_FILE="${{ steps.claude.outputs.execution_file }}"
+          if [ -z "${OUT_FILE:-}" ] || [ ! -f "$OUT_FILE" ]; then
+            OUT_FILE=$(find "${RUNNER_TEMP:-/home/runner/work/_temp}" -maxdepth 2 -name 'claude-execution-output.json' 2>/dev/null | head -1)
+            OUT_FILE="${OUT_FILE:-/home/runner/work/_temp/claude-execution-output.json}"
+          fi
+          echo "exec output file: '${OUT_FILE}'"
           EXEC_SUBTYPE=$(jq -r '.subtype // empty' "$OUT_FILE" 2>/dev/null || true)
           EXEC_IS_ERROR=$(jq -r '.is_error // empty' "$OUT_FILE" 2>/dev/null || true)
           EXEC_COST=$(jq -r '.total_cost_usd // empty' "$OUT_FILE" 2>/dev/null || true)
