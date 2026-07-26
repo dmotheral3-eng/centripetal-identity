@@ -53,7 +53,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout base branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5  # node24 — v4 targets the deprecated node20 runtime (COS-336)
         with:
           ref: ${{ inputs.base_branch }}
           # Full history so the runner can branch and diff cleanly.
