@@ -23,9 +23,51 @@ to any app breaks.
 | Export | Purpose |
 | --- | --- |
 | `LoginSplash` | Sign-in surface: Google + Microsoft SSO buttons + magic-link email fallback. Light-editorial styling. |
+| `checkAccess(supabase, gate)` | The **post-sign-in authorization gate**. Two modes — SOLO (email allow-list) or MEMBERSHIP (tenant/role). |
+| `isAllowedEmail(supabase, emails)` | SOLO convenience wrapper — is the signed-in user's email in the list? |
 | `getMemberships(supabase, userId)` | All active memberships for a user, from the app-local DB. |
-| `hasMembership(supabase, { tenant, role? })` | Membership/role gate via the `is_tenant_member` read pattern. |
+| `hasMembership(supabase, { tenant, role? })` | Membership/role read via the `is_tenant_member` pattern (MEMBERSHIP mode's primitive). |
 | `Pill`, `tokens` | Status-pill component and the Token Set B design tokens, exported for reuse. |
+
+## Authentication vs. authorization
+
+Two separate jobs, two separate exports:
+
+- **`LoginSplash` authenticates** — proves *who* the user is (Google / Microsoft / magic link).
+- **`checkAccess` authorizes** — decides whether that verified person may *enter this
+  app*. You call it after sign-in, in your auth-callback route or a route guard.
+
+The login door always works; the gate is the vault side and **fails closed**.
+
+### The two gate modes — the app picks one
+
+**SOLO** — a fixed allow-list of specific emails. For single-operator internal tools
+(e.g. MotherDesk) where "membership" is just "is it him." The allow-list is **your**
+config; this package hardcodes no one's email.
+
+```ts
+import { checkAccess } from '@centripetal/identity';
+
+const { allowed } = await checkAccess(supabase, {
+  mode: 'solo',
+  allowedEmails: [import.meta.env.VITE_ALLOWED_EMAIL], // supplied by the app
+});
+if (!allowed) redirectToSignedOut();
+```
+
+**MEMBERSHIP** — the `is_tenant_member` tenant/role pattern for multi-user apps.
+
+```ts
+const { allowed } = await checkAccess(supabase, {
+  mode: 'membership',
+  tenant: 'cw-mineral',
+  role: 'admin', // optional
+});
+```
+
+`checkAccess` returns `{ allowed, email, reason }` — `reason` is one of `ok`,
+`not-signed-in`, `not-allowlisted`, `not-a-member`, `empty-allowlist`, useful for
+logging and friendly denial screens.
 
 ## Constraints (by construction)
 
@@ -36,6 +78,18 @@ to any app breaks.
 - **No infrastructure vendor names in the UI (P#62).** The only provider names
   shown are the identity providers the user must choose between; they are
   overridable via `providerLabels`.
+
+## Import in three steps
+
+1. **Install** — `npm install github:dmotheral3-eng/centripetal-identity#v0.1.0`
+   (builds itself on install; peer-deps `react` + `@supabase/supabase-js` you already have).
+2. **Wrap your login route** — render `<LoginSplash supabaseClient={supabase} appName="…" />`
+   (`redirectTo` defaults to the current origin).
+3. **Gate the app** — after sign-in, call `checkAccess(supabase, gate)` with either
+   `{ mode: 'solo', allowedEmails: [...] }` **or** `{ mode: 'membership', tenant, role? }`,
+   and bounce anyone whose `allowed` is `false`.
+
+The rest of this section expands each step.
 
 ## Per-app adoption
 
@@ -83,12 +137,20 @@ export default function SignInPage() {
 }
 ```
 
-Gate a route on membership:
+Gate the app on entry — pick SOLO or MEMBERSHIP (see
+[the two gate modes](#the-two-gate-modes--the-app-picks-one)):
 
 ```ts
-import { hasMembership } from '@centripetal/identity';
+import { checkAccess } from '@centripetal/identity';
 
-const ok = await hasMembership(supabase, { tenant: 'cw-mineral', role: 'admin' });
+// SOLO — Dave-only internal tool
+const { allowed } = await checkAccess(supabase, {
+  mode: 'solo',
+  allowedEmails: [import.meta.env.VITE_ALLOWED_EMAIL],
+});
+
+// …or MEMBERSHIP — multi-user app
+// const { allowed } = await checkAccess(supabase, { mode: 'membership', tenant: 'cw-mineral', role: 'admin' });
 ```
 
 ### 5. Migrate existing password users
@@ -102,7 +164,7 @@ account loss (the Wes/Chay case on the CWM cockpit).
 | Prop | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `supabaseClient` | `SupabaseClient` | — | The app's own client. All auth calls target this. |
-| `redirectTo` | `string` | — | Absolute return URL after auth. |
+| `redirectTo` | `string` | current origin | Absolute return URL after auth. Defaults to `window.location.origin`. |
 | `appName` | `string` | — | Shown in the headline. |
 | `providers` | `('google' \| 'azure')[]` | both | Which SSO buttons to show. |
 | `tagline` | `string` | `"Sign in to continue."` | Line under the headline. |
