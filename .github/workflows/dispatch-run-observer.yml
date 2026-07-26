@@ -1,0 +1,91 @@
+name: Dispatch Run Observer
+
+# COS-336 · 2026-07-26. The log the OS cannot reach, pushed home by a runner.
+#
+# WHY: pg_net cannot fetch a job log — GitHub 302s to a signed blob host and the
+# database's fetcher dies mid-transfer. A runner can follow that redirect. So when
+# a Claude Dispatch run fails, this observer pulls that run's own log and posts the
+# tail to Supabase, keyed on the run URL.
+#
+# WHY IT CARRIES NO AGENT: an investigator must not depend on the thing most likely
+# to be broken. On 2026-07-26 every Claude step across the fleet failed because the
+# Anthropic account ran out of credit; an agent-based investigator would have failed
+# identically and reported nothing. This workflow uses only GITHUB_TOKEN, jq, curl
+# and unzip, so it keeps working precisely when the interesting failures happen.
+#
+# LOOP SAFETY: it triggers only on Claude Dispatch, never on itself, and it writes
+# nothing to the repository.
+
+on:
+  workflow_run:
+    workflows: ["Claude Dispatch"]
+    types: [completed]
+
+permissions:
+  actions: read      # read the triggering run's jobs and download its logs
+  contents: read
+  id-token: write    # OIDC to the observer endpoint — no shared secret
+
+concurrency:
+  group: dispatch-observer-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  observe:
+    # Only failures are worth a log pull. Successes already report through the callback.
+    if: github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull the failed run's log and report it home
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          OBSERVER_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          OBSERVER_URL: ${{ vars.SUPABASE_LOG_OBSERVER_URL }}
+        run: |
+          # Never fail the observer on a missing piece: a partial report beats none.
+          set -uo pipefail
+
+          if [ -z "${OBSERVER_URL:-}" ]; then
+            echo "SUPABASE_LOG_OBSERVER_URL not set — nothing to report to. Exiting clean."
+            exit 0
+          fi
+
+          # Name the failed step from the jobs API (cheap, always available).
+          FAILED_STEP=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" \
+            --jq '[.jobs[] | select(.conclusion=="failure") | .steps[]? | select(.conclusion=="failure") | .name] | first // ""' 2>/dev/null || echo "")
+          echo "failed step: '${FAILED_STEP}'"
+
+          # The whole point: download the log archive. This is the redirect the
+          # database cannot follow.
+          LOG_TAIL=""
+          if gh api "repos/$REPO/actions/runs/$RUN_ID/logs" > /tmp/logs.zip 2>/tmp/logerr; then
+            mkdir -p /tmp/logs && unzip -o -q /tmp/logs.zip -d /tmp/logs 2>/dev/null || true
+            # Prefer lines that carry a cause; fall back to the raw tail.
+            LOG_TAIL=$( (grep -rhiE '(error|denied|refused|invalid|exceeded|credit|quota|rate limit|unauthorized|forbidden|not found)' /tmp/logs || true) | tail -c 12000 )
+            if [ -z "$LOG_TAIL" ]; then
+              LOG_TAIL=$( (cat /tmp/logs/*/*.txt 2>/dev/null || cat /tmp/logs/* 2>/dev/null) | tail -c 12000 )
+            fi
+          else
+            LOG_TAIL="log download failed: $(head -c 400 /tmp/logerr 2>/dev/null)"
+          fi
+          echo "log tail chars: ${#LOG_TAIL}"
+
+          OIDC_TOKEN=$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$OBSERVER_URL" | jq -r .value)
+
+          PAYLOAD=$(jq -nc \
+            --arg run_url "$RUN_URL" \
+            --arg conclusion "$CONCLUSION" \
+            --arg failed_step "$FAILED_STEP" \
+            --arg observer_run_url "$OBSERVER_RUN_URL" \
+            --arg log_tail "$LOG_TAIL" \
+            '{run_url:$run_url, conclusion:$conclusion, failed_step:$failed_step, observer_run_url:$observer_run_url, log_tail:$log_tail}')
+
+          curl -sS --fail-with-body -X POST "$OBSERVER_URL" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $OIDC_TOKEN" \
+            -d "$PAYLOAD"
