@@ -78,6 +78,11 @@ jobs:
           # Auth via the repo secret ANTHROPIC_API_KEY.
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           base_branch: ${{ inputs.base_branch }}
+          # FULL OUTPUT (COS-336, 2026-07-26). The action suppresses the real API
+          # error by default and prints only "result is_error:true"; its own log says
+          # to enable this for full output. Without it, a 350ms $0 rejection is
+          # indistinguishable from a quota wall, a bad key, or a bad model string.
+          show_full_output: true
           # Headless trusted runner: grant Claude its tools. The action's default sandbox
           # denies Bash/git/Write (permission_denials), which is why prior runs pushed nothing.
           claude_args: "--dangerously-skip-permissions"
