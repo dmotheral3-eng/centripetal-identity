@@ -140,6 +140,19 @@ jobs:
           OIDC_TOKEN=$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$CALLBACK_URL" | jq -r .value)
 
+          # Failure detail (COS-336): read the Claude execution output defensively.
+          # Every line tolerates a missing file, bad JSON, or absent jq keys — this
+          # block must NEVER break the callback (the callback firing is the door).
+          # The file is FOUND, not assumed: fast deaths write it in varying temp roots.
+          OUT_FILE=$(find "${RUNNER_TEMP:-/home/runner/work/_temp}" -maxdepth 2 -name 'claude-execution-output.json' 2>/dev/null | head -1)
+          OUT_FILE="${OUT_FILE:-/home/runner/work/_temp/claude-execution-output.json}"
+          EXEC_SUBTYPE=$(jq -r '.subtype // empty' "$OUT_FILE" 2>/dev/null || true)
+          EXEC_IS_ERROR=$(jq -r '.is_error // empty' "$OUT_FILE" 2>/dev/null || true)
+          EXEC_COST=$(jq -r '.total_cost_usd // empty' "$OUT_FILE" 2>/dev/null || true)
+          EXEC_TURNS=$(jq -r '.num_turns // empty' "$OUT_FILE" 2>/dev/null || true)
+          EXEC_ERRTEXT=$(jq -r '(.result // .error // "") | tostring' "$OUT_FILE" 2>/dev/null | head -c 800 || true)
+          echo "exec detail: subtype='${EXEC_SUBTYPE}' is_error='${EXEC_IS_ERROR}' cost='${EXEC_COST}' turns='${EXEC_TURNS}'"
+
           PAYLOAD=$(jq -nc \
             --arg dispatch_id "$DISPATCH_ID" \
             --arg status "$STATUS" \
@@ -149,7 +162,12 @@ jobs:
             --arg ticket "$TICKET" \
             --arg branch "$BRANCH_OUT" \
             --argjson is_question "$IS_Q" \
-            '{dispatch_id:$dispatch_id, status:$status, run_url:$run_url, repo:$repo, base:$base, ticket:$ticket, branch:$branch, is_question:$is_question}')
+            --arg exec_subtype "$EXEC_SUBTYPE" \
+            --arg exec_is_error "$EXEC_IS_ERROR" \
+            --arg exec_cost "$EXEC_COST" \
+            --arg exec_turns "$EXEC_TURNS" \
+            --arg exec_error_text "$EXEC_ERRTEXT" \
+            '{dispatch_id:$dispatch_id, status:$status, run_url:$run_url, repo:$repo, base:$base, ticket:$ticket, branch:$branch, is_question:$is_question, exec:{subtype:$exec_subtype, is_error:$exec_is_error, total_cost_usd:$exec_cost, num_turns:$exec_turns, error_text:$exec_error_text}}')
 
           curl -sS --fail-with-body -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
