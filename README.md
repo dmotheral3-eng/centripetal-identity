@@ -171,6 +171,17 @@ account loss (the Wes/Chay case on the CWM cockpit).
 | `providerLabels` | `Partial<Record<provider, string>>` | — | Override button labels. |
 | `injectFonts` | `boolean` | `true` | Set `false` if the host app already loads Fraunces / IBM Plex. |
 
+### The sign-in button always resolves
+
+A provider call that reports no error is not proof the browser is leaving. If the
+client hands back no sign-in address (`url: null` — provider not finished being
+configured, an SSR/edge context, any client that cannot navigate), the button
+stops spinning and shows an actionable error instead. A watchdog does the same
+after 8 seconds if a redirect or pop-up was blocked, and for a send-the-link call
+that never comes back. When a real redirect does happen, behaviour is unchanged:
+the spinner stays up and the browser takes the page. No path leaves a spinner
+running forever.
+
 ## Local sandbox
 
 A bare Vite sandbox lives in [`sandbox/`](./sandbox) to render the component in
@@ -182,8 +193,15 @@ npm install
 npm run dev
 ```
 
-It renders `LoginSplash` against a stub Supabase client, so the surface works
-with no real project configured.
+It renders `LoginSplash` against a no-network stub Supabase client, so the surface
+renders with no real project configured — and the sign-in buttons therefore
+**cannot complete a sign-in**. A banner on the page says so, and clicking a
+provider button now ends in a visible error rather than an endless spinner.
+
+The sandbox imports `@centripetal/identity` by its published specifier, but
+`sandbox/vite.config.ts` aliases that to `../src/index.ts`. Everything the
+sandbox shows — including the gate board below — is therefore evidence about the
+**working tree**, not about the published tag a consumer app has pinned.
 
 ### The gate harness
 

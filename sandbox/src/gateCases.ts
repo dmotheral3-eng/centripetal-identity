@@ -8,6 +8,13 @@
  * `undefined` (not just `null`) sessions in BOTH modes, malformed input, and a
  * malformed gate object.
  *
+ * WHAT IS UNDER TEST: the import below is written against the published
+ * specifier `@centripetal/identity`, but `sandbox/vite.config.ts` aliases that to
+ * `../src/index.ts`. So these cases exercise the WORKING TREE — this branch's
+ * gate source — not the published v0.1.0 tag that consumer apps install. A green
+ * board is evidence about this branch. It becomes evidence about what the seven
+ * apps run only once this source is the tag they have pinned.
+ *
  * Every case runs against `makeGateStubClient` — no project, no keys, no
  * network. Emails and tenant slugs below are `example.com` test literals; the
  * package still hardcodes no one's address.

@@ -7,11 +7,14 @@
  * INVARIANTS honoured here:
  *   - No hosted runtime auth service: every call targets the supabaseClient the
  *     app passes in. This component never reaches a central broker or hub.
+ *   - No spinner without an end. Every busy state resolves into a navigation, a
+ *     success, or a visible actionable error — never an indefinite wait. The
+ *     provider call reporting no error is NOT proof the browser is leaving.
  *   - No infrastructure vendor names in any rendered string (P#62). The only
  *     provider names shown are the identity providers the user must choose
  *     between (functionally unavoidable) and they are overridable via props.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { tokens } from './tokens';
@@ -45,6 +48,32 @@ const DEFAULT_PROVIDER_LABELS: Record<OAuthProviderKey, string> = {
 const FONT_HREF =
   'https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap';
 
+/**
+ * How long a busy state may last before we stop believing a redirect is coming.
+ * A real provider hand-off unloads this page in well under a second; anything
+ * still sitting here after this long is stuck, and a stuck spinner tells the
+ * person nothing. Long enough not to interrupt a slow-but-real navigation.
+ */
+const BUSY_WATCHDOG_MS = 8000;
+
+/**
+ * The provider call succeeded but handed back nowhere to go. Happens when the
+ * provider is not finished being configured, or when the client is running
+ * somewhere it cannot navigate (SSR/edge). Neither is the person's fault, so
+ * the copy points at the two things they CAN do. No vendor names (P#62), and we
+ * never name a provider we were not told about.
+ */
+const NO_DESTINATION_MESSAGE =
+  'Sign-in couldn’t start — this app got no sign-in address back. Use the email link below, or ask whoever set up this app to finish configuring sign-in.';
+
+/** Redirect or pop-up never happened, and nothing errored to tell us why. */
+const REDIRECT_STALLED_MESSAGE =
+  'Sign-in didn’t open. A pop-up or redirect blocker may be in the way — allow them for this site and try again, or use the email link below.';
+
+/** The send-a-link call never came back at all. */
+const LINK_STALLED_MESSAGE =
+  'Still waiting on the sign-in link. Check your connection and try again, or use a sign-in button above.';
+
 type Status =
   | { kind: 'idle' }
   | { kind: 'redirecting'; provider: OAuthProviderKey }
@@ -63,6 +92,7 @@ export function LoginSplash({
 }: LoginSplashProps) {
   const [email, setEmail] = useState('');
   const [status, setStatus] = useState<Status>({ kind: 'idle' });
+  const mounted = useRef(true);
 
   // Default the post-auth return to the current origin. An app can still pass an
   // explicit path (e.g. `${origin}/auth/callback`) via the redirectTo prop.
@@ -87,19 +117,62 @@ export function LoginSplash({
     document.head.appendChild(link);
   }, [injectFonts]);
 
+  // Set on setup, not just cleared on teardown, so a StrictMode remount does not
+  // leave the component permanently marked as gone.
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  /**
+   * The watchdog. A busy state is a promise that something is about to happen;
+   * if nothing has, say so instead of spinning forever. Re-armed on every status
+   * change and cleared on unmount, so it can never fire into a dead component.
+   */
+  useEffect(() => {
+    if (status.kind !== 'redirecting' && status.kind !== 'sending-link') return;
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    const wasRedirecting = status.kind === 'redirecting';
+    const timer = window.setTimeout(() => {
+      // Still here after the wait: the document never went anywhere.
+      if (!mounted.current) return;
+      setStatus({
+        kind: 'error',
+        message: wasRedirecting ? REDIRECT_STALLED_MESSAGE : LINK_STALLED_MESSAGE,
+      });
+    }, BUSY_WATCHDOG_MS);
+    return () => window.clearTimeout(timer);
+  }, [status]);
+
   const labelFor = (p: OAuthProviderKey) =>
     providerLabels?.[p] ?? DEFAULT_PROVIDER_LABELS[p];
 
   async function signInWithProvider(provider: OAuthProviderKey) {
     setStatus({ kind: 'redirecting', provider });
-    const { error } = await supabaseClient.auth.signInWithOAuth({
+    const { data, error } = await supabaseClient.auth.signInWithOAuth({
       provider,
       options: { redirectTo: resolvedRedirectTo },
     });
+    if (!mounted.current) return;
     if (error) {
       setStatus({ kind: 'error', message: error.message });
+      return;
     }
-    // On success the browser is redirected away; no further UI needed.
+    // Success used to be assumed to mean "the browser is leaving". It does not:
+    // a client can resolve with no error AND no destination (provider not
+    // configured, no window to navigate, any client returning url: null), and
+    // then nothing ever happens. Holding 'redirecting' there is the spinner that
+    // never stops. Only a real destination earns the spinner.
+    const destination = (data as { url?: string | null } | null | undefined)?.url;
+    if (typeof destination === 'string' && destination.length > 0) {
+      // A navigation is under way — keep the spinner exactly as before and let
+      // the browser take the page. The watchdog stays armed in case a blocker
+      // eats the redirect.
+      return;
+    }
+    setStatus({ kind: 'error', message: NO_DESTINATION_MESSAGE });
   }
 
   async function sendMagicLink(e: React.FormEvent) {
@@ -114,6 +187,7 @@ export function LoginSplash({
       email: trimmed,
       options: { emailRedirectTo: resolvedRedirectTo },
     });
+    if (!mounted.current) return;
     setStatus(
       error
         ? { kind: 'error', message: error.message }
