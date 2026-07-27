@@ -184,3 +184,24 @@ npm run dev
 
 It renders `LoginSplash` against a stub Supabase client, so the surface works
 with no real project configured.
+
+### The gate harness
+
+Below the login panel the sandbox runs **`checkAccess` live, in the browser, on
+mount** — both modes, 23 cases, against the same no-network stub client. Deny
+cases pass *when they deny*: a green board means the gate refused everything it
+should have refused. The case table lives in
+[`sandbox/src/gateCases.ts`](./sandbox/src/gateCases.ts) and mirrors the cases
+proven in `.dispatch/D-IDENTITY-2B-review.md`.
+
+Two machine-readable copies of the run, so the gate can be verified without
+reading the page:
+
+| Where | Written by | Read it with |
+| --- | --- | --- |
+| `window.__GATE_HARNESS__` | the browser run | console / a headless probe |
+| `<script type="application/json" id="gate-harness-results">` | the browser run, appended after it finishes | DOM query on the rendered page |
+| `<script type="application/json" id="gate-harness-static">` | the same table run in Node at **build time**, inlined into `index.html` | `curl <origin> \| grep -A4 gate-harness-static` — **no JavaScript required** |
+
+All three carry `{ total, passed, failed, cases: [...] }`. The static and runtime
+blocks come from one table, so they cannot disagree about what the gate must do.
