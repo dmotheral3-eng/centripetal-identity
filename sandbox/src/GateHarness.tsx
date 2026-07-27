@@ -11,6 +11,12 @@
  *
  * Read the board as: a green row on a deny case means the gate refused someone
  * it had to refuse. A green board means it refused everything it should have.
+ *
+ * WHAT IS UNDER TEST: the `@centripetal/identity` import below is the published
+ * specifier, but `sandbox/vite.config.ts` aliases it to `../src/index.ts`. This
+ * board therefore reports on the WORKING TREE, not on the published v0.1.0 tag
+ * consumer apps install. Stated on the page too — the distinction is the whole
+ * value of the evidence.
  */
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
@@ -142,6 +148,13 @@ export function GateHarness() {
           Both gate modes, run live in this browser on mount against a no-network stub client.
           Deny cases <strong>pass when they deny</strong> — a green board means the gate refused
           everything it should have refused.
+        </p>
+        <p style={{ margin: '0 0 20px', color: tokens.color.dim, fontSize: 13, maxWidth: 780 }}>
+          Under test: the <strong>working tree</strong> —{' '}
+          <code style={{ fontFamily: tokens.font.mono }}>@centripetal/identity</code> is aliased to{' '}
+          <code style={{ fontFamily: tokens.font.mono }}>../src/index.ts</code>, so this board reports
+          on this branch's source, not on the published{' '}
+          <code style={{ fontFamily: tokens.font.mono }}>v0.1.0</code> tag consumer apps install.
         </p>
         <p style={{ margin: '0 0 20px', color: tokens.color.dim, fontSize: 13, maxWidth: 780 }}>
           Cases <code style={{ fontFamily: tokens.font.mono }}>2B-*</code> mirror the 16 proven in{' '}
