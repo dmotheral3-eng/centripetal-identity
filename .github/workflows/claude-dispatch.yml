@@ -1,6 +1,12 @@
 name: Claude Dispatch
 
 # Headless Claude Code worker (corrected 2026-07-20, RUNNER-REVIVE-1, Option B).
+# HARDENED 2026-08-15 (rail-hardening-playbook Legs 1-3, QB1 seat):
+#   Leg 1 - salvage push on failure: a crashed Claude step still produces a branch.
+#   Leg 2 - honest is_question: QUESTION only when the branch is REPORT-ONLY
+#           (diff vs base touches nothing outside .dispatch/). A branch carrying
+#           source changes is a change, whatever else it also carries.
+#   Leg 3 - timeout-minutes: a runaway dies on a clock we chose.
 # The orchestrator triggers this via workflow_dispatch (dispatch_id + ticket + prompt).
 #
 # HOW IT WORKS (and why):
@@ -14,6 +20,10 @@ name: Claude Dispatch
 #   protection stays untouched; Actions can never approve or merge.
 # - Blocked runs push .dispatch/QUESTION.md on the branch; the callback opens a
 #   "QUESTION:" draft PR so a human can rule. Never stop empty-handed.
+# - MODEL PIN (D-MODELWIRE-1, 2026-08-06): the orchestrator resolves the row's model_tier
+#   through model_routing at fire time and passes the api model string in `model`. Empty
+#   (the default) preserves the action's own default, so this input is order-safe: the
+#   workflow can ship before the firer sends it. Never hardcode a version string here.
 
 on:
   workflow_dispatch:
@@ -35,6 +45,11 @@ on:
         required: false
         default: main
         type: string
+      model:
+        description: "API model string resolved from model_routing at fire time. Empty = action default."
+        required: false
+        default: ""
+        type: string
 
 # Least privilege: contents:write for the runner's push, id-token:write for the OIDC
 # callback. PR creation is server-side (Vault PAT), so no pull-requests permission here.
@@ -51,6 +66,8 @@ concurrency:
 jobs:
   dispatch:
     runs-on: ubuntu-latest
+    # Leg 3 (D3): budget. A runaway run dies on our clock, not the action's crash.
+    timeout-minutes: 45
     steps:
       - name: Checkout base branch
         uses: actions/checkout@v5  # node24 — v4 targets the deprecated node20 runtime (COS-336)
@@ -80,7 +97,8 @@ jobs:
           base_branch: ${{ inputs.base_branch }}
           # Headless trusted runner: grant Claude its tools. The action's default sandbox
           # denies Bash/git/Write (permission_denials), which is why prior runs pushed nothing.
-          claude_args: "--dangerously-skip-permissions --model claude-sonnet-4-6"
+          # MODEL PIN: --model appended only when the orchestrator supplied one.
+          claude_args: ${{ inputs.model != '' && format('--dangerously-skip-permissions --model {0}', inputs.model) || '--dangerously-skip-permissions' }}
           # The action exposes no branch output, so Claude does the git itself.
           prompt: |
             You are running headless in GitHub Actions on ${{ github.repository }} (base branch ${{ inputs.base_branch }}).
@@ -92,15 +110,47 @@ jobs:
               3. git add -A && git commit -m "${{ inputs.ticket }}"
               4. git push origin ${{ steps.vars.outputs.branch }}
 
-            NEVER STOP EMPTY-HANDED. If you are blocked, cannot complete the task, or need
-            a human ruling: write the question and full context to .dispatch/QUESTION.md,
-            then run steps 1, 3, 4 to push branch ${{ steps.vars.outputs.branch }} carrying
-            that file. A QUESTION draft PR will open so a human can rule.
+            ONLY IF GENUINELY BLOCKED and unable to complete the task or needing a human
+            ruling: write the question and full context to .dispatch/QUESTION.md, then run
+            steps 1, 3, 4 to push branch ${{ steps.vars.outputs.branch }} carrying that
+            file. Do NOT write .dispatch/QUESTION.md on a successful run - a run that
+            completed its task has no question. A QUESTION draft PR will open so a human
+            can rule. Never stop empty-handed.
 
             Push exactly one branch. Do NOT open a pull request yourself - the callback does that.
 
             TASK:
             ${{ inputs.prompt }}
+
+      - name: Salvage push on failure
+        # Leg 1 (D1): work must never die with the run. If the Claude step crashed
+        # before pushing, stage whatever is in the working tree and push it as WIP.
+        # The Claude action revokes the workspace git credential at step-end, so the
+        # push authenticates explicitly with GITHUB_TOKEN (contents: write).
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.vars.outputs.branch }}
+          TICKET: ${{ inputs.ticket }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          # Already pushed? Then Claude got to step 4 before dying - nothing to salvage.
+          if gh api "repos/$REPO/git/ref/heads/$BRANCH" >/dev/null 2>&1; then
+            echo "Branch already on remote - no salvage needed."
+            exit 0
+          fi
+          git config user.name "claude-dispatch-salvage"
+          git config user.email "dispatch@centripetal-ai.com"
+          git checkout -B "$BRANCH"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Working tree clean - nothing to salvage."
+            exit 0
+          fi
+          git commit -m "WIP: ${TICKET} (salvaged from failed run)"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$BRANCH" \
+            || echo "Salvage push failed - callback will still report the failure."
 
       - name: Report to Supabase callback (opens the PR server-side)
         # Always run so the orchestrator learns the outcome even on failure.
@@ -130,8 +180,20 @@ jobs:
           IS_Q="false"
           if gh api "repos/$REPO/git/ref/heads/$BRANCH" >/dev/null 2>&1; then
             BRANCH_OUT="$BRANCH"
+            # Leg 2 (D2): honest is_question. The old test was PRESENCE of
+            # .dispatch/QUESTION.md, which agents write defensively even on success -
+            # a zero-information flag wired to a permanent automerge refusal (47 PRs
+            # parked, 23 landable, at diagnosis). QUESTION now means REPORT-ONLY:
+            # the file exists AND the diff against base touches nothing outside
+            # .dispatch/. A branch carrying source changes is a change.
             if gh api "repos/$REPO/contents/.dispatch/QUESTION.md?ref=$BRANCH" >/dev/null 2>&1; then
-              IS_Q="true"
+              NON_DISPATCH_CHANGES=$(gh api "repos/$REPO/compare/$BASE...$BRANCH" \
+                --jq '[.files[].filename | select(startswith(".dispatch/") | not)] | length' \
+                2>/dev/null || echo "unknown")
+              if [ "$NON_DISPATCH_CHANGES" = "0" ]; then
+                IS_Q="true"
+              fi
+              echo "QUESTION.md present; non-dispatch changed files: ${NON_DISPATCH_CHANGES}"
             fi
           fi
           echo "branch on remote: '${BRANCH_OUT}' | question: ${IS_Q}"
