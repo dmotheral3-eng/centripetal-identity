@@ -18,7 +18,7 @@ name: Claude Dispatch
 #   dispatch-callback function (authenticated with a per-run GitHub OIDC token), and
 #   that function opens the DRAFT PR server-side using the Vault dispatch PAT. Branch
 #   protection stays untouched; Actions can never approve or merge.
-# - Blocked runs push .dispatch/QUESTION.md on the branch; the callback opens a
+# - Blocked runs push .dispatch/questions/<dispatch-id>.md on the branch; the callback opens a
 #   "QUESTION:" draft PR so a human can rule. Never stop empty-handed.
 # - MODEL PIN (D-MODELWIRE-1, 2026-08-06): the orchestrator resolves the row's model_tier
 #   through model_routing at fire time and passes the api model string in `model`. Empty
@@ -115,9 +115,9 @@ jobs:
               4. git push origin ${{ steps.vars.outputs.branch }}
 
             ONLY IF GENUINELY BLOCKED and unable to complete the task or needing a human
-            ruling: write the question and full context to .dispatch/QUESTION.md, then run
+            ruling: write the question and full context to .dispatch/questions/${{ inputs.dispatch_id }}.md, then run
             steps 1, 3, 4 to push branch ${{ steps.vars.outputs.branch }} carrying that
-            file. Do NOT write .dispatch/QUESTION.md on a successful run - a run that
+            file. Do NOT write .dispatch/questions/${{ inputs.dispatch_id }}.md on a successful run - a run that
             completed its task has no question. A QUESTION draft PR will open so a human
             can rule. Never stop empty-handed.
 
@@ -185,19 +185,20 @@ jobs:
           if gh api "repos/$REPO/git/ref/heads/$BRANCH" >/dev/null 2>&1; then
             BRANCH_OUT="$BRANCH"
             # Leg 2 (D2): honest is_question. The old test was PRESENCE of
-            # .dispatch/QUESTION.md, which agents write defensively even on success -
+            # the question file, which agents write defensively even on success -
             # a zero-information flag wired to a permanent automerge refusal (47 PRs
             # parked, 23 landable, at diagnosis). QUESTION now means REPORT-ONLY:
             # the file exists AND the diff against base touches nothing outside
             # .dispatch/. A branch carrying source changes is a change.
-            if gh api "repos/$REPO/contents/.dispatch/QUESTION.md?ref=$BRANCH" >/dev/null 2>&1; then
+            if gh api "repos/$REPO/contents/.dispatch/questions/$DISPATCH_ID.md?ref=$BRANCH" >/dev/null 2>&1 \
+               || gh api "repos/$REPO/contents/.dispatch/QUESTION.md?ref=$BRANCH" >/dev/null 2>&1; then
               NON_DISPATCH_CHANGES=$(gh api "repos/$REPO/compare/$BASE...$BRANCH" \
                 --jq '[.files[].filename | select(startswith(".dispatch/") | not)] | length' \
                 2>/dev/null || echo "unknown")
               if [ "$NON_DISPATCH_CHANGES" = "0" ]; then
                 IS_Q="true"
               fi
-              echo "QUESTION.md present; non-dispatch changed files: ${NON_DISPATCH_CHANGES}"
+              echo "question file present; non-dispatch changed files: ${NON_DISPATCH_CHANGES}"
             fi
           fi
           echo "branch on remote: '${BRANCH_OUT}' | question: ${IS_Q}"
