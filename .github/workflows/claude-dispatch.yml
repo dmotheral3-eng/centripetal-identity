@@ -111,13 +111,21 @@ jobs:
             This action exposes no branch output and nothing else will push for you:
               1. git checkout -b ${{ steps.vars.outputs.branch }}
               2. Complete the TASK below, editing files as needed.
-              3. git add -A && git commit -m "${{ inputs.ticket }}"
+              3. git add -A -- . ':!.dispatch' && git commit -m "${{ inputs.ticket }}"
               4. git push origin ${{ steps.vars.outputs.branch }}
 
+            A NORMAL (non-question) run must NEVER stage or commit anything under
+            .dispatch/ - step 3's pathspec excludes that directory on purpose. The
+            classifier downstream decides QUESTION vs DONE from exactly what this
+            branch changed under .dispatch/, so a stray file landing there on an
+            ordinary run can misclassify it.
+
             ONLY IF GENUINELY BLOCKED and unable to complete the task or needing a human
-            ruling: write the question and full context to .dispatch/questions/${{ inputs.dispatch_id }}.md, then run
-            steps 1, 3, 4 to push branch ${{ steps.vars.outputs.branch }} carrying that
-            file. Do NOT write .dispatch/questions/${{ inputs.dispatch_id }}.md on a successful run - a run that
+            ruling: write the question and full context to .dispatch/questions/${{ inputs.dispatch_id }}.md, then run:
+              git add .dispatch/questions/${{ inputs.dispatch_id }}.md && git commit -m "${{ inputs.ticket }}"
+              git push origin ${{ steps.vars.outputs.branch }}
+            (step 1 first if you haven't branched yet). Do NOT write
+            .dispatch/questions/${{ inputs.dispatch_id }}.md on a successful run - a run that
             completed its task has no question. A QUESTION draft PR will open so a human
             can rule. Never stop empty-handed.
 
@@ -184,22 +192,24 @@ jobs:
           IS_Q="false"
           if gh api "repos/$REPO/git/ref/heads/$BRANCH" >/dev/null 2>&1; then
             BRANCH_OUT="$BRANCH"
-            # Leg 2 (D2): honest is_question. The old test was PRESENCE of
-            # the question file, which agents write defensively even on success -
-            # a zero-information flag wired to a permanent automerge refusal (47 PRs
-            # parked, 23 landable, at diagnosis). QUESTION now means REPORT-ONLY:
-            # the file exists AND the diff against base touches nothing outside
-            # .dispatch/. A branch carrying source changes is a change.
-            if gh api "repos/$REPO/contents/.dispatch/questions/$DISPATCH_ID.md?ref=$BRANCH" >/dev/null 2>&1 \
-               || gh api "repos/$REPO/contents/.dispatch/QUESTION.md?ref=$BRANCH" >/dev/null 2>&1; then
-              NON_DISPATCH_CHANGES=$(gh api "repos/$REPO/compare/$BASE...$BRANCH" \
-                --jq '[.files[].filename | select(startswith(".dispatch/") | not)] | length' \
-                2>/dev/null || echo "unknown")
-              if [ "$NON_DISPATCH_CHANGES" = "0" ]; then
-                IS_Q="true"
-              fi
-              echo "question file present; non-dispatch changed files: ${NON_DISPATCH_CHANGES}"
+            # Leg 2 (D2) + COS-2742 fix: honest is_question, computed ONLY from
+            # what THIS branch changed vs base (the compare API) - never from
+            # `contents/...?ref=$BRANCH`, which reads base-inherited tree state
+            # and cannot tell "this run wrote it" from "base already had it".
+            # One committed .dispatch/QUESTION.md on main once made every run,
+            # fleet-wide, read as base-inherited-question regardless of what the
+            # run itself did (COS-2742). QUESTION now means: the diff itself
+            # contains the exact question sentinel path, AND touches nothing
+            # else outside .dispatch/ - a branch carrying source changes is a
+            # change, whatever else it also carries.
+            CHANGED_FILES=$(gh api "repos/$REPO/compare/$BASE...$BRANCH" --jq '[.files[].filename]' 2>/dev/null || echo "[]")
+            HAS_QUESTION_FILE=$(echo "$CHANGED_FILES" | jq -r --arg id "$DISPATCH_ID" \
+              'any(.[]; . == ".dispatch/questions/\($id).md" or . == ".dispatch/QUESTION.md")')
+            NON_DISPATCH_CHANGES=$(echo "$CHANGED_FILES" | jq '[.[] | select(startswith(".dispatch/") | not)] | length')
+            if [ "$HAS_QUESTION_FILE" = "true" ] && [ "$NON_DISPATCH_CHANGES" = "0" ]; then
+              IS_Q="true"
             fi
+            echo "question file changed by this branch: ${HAS_QUESTION_FILE} | non-dispatch changed files: ${NON_DISPATCH_CHANGES}"
           fi
           echo "branch on remote: '${BRANCH_OUT}' | question: ${IS_Q}"
 
